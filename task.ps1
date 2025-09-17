@@ -1,78 +1,89 @@
-# --------------------------
-# Configuration
-# --------------------------
-$location = "uksouth"
-$resourceGroupName = "mate-resources"   # ✅ Fix: must be mate-resources
+param (
+    [string]$resourceGroupName = "mate-resources",
+    [string]$location = "East US",
+    [string]$vnetName = "mate-vnet"
+)
 
-$virtualNetworkName = "todoapp"
-$vnetAddressPrefix = "10.20.30.0/24"
-
+# Сабнети
 $webSubnetName = "webservers"
-$webSubnetIpRange = "10.20.30.0/26"
-
 $dbSubnetName = "database"
-$dbSubnetIpRange = "10.20.30.64/26"
+$mgmtSubnetName = "management"
 
-$mngSubnetName = "management"
-$mngSubnetIpRange = "10.20.30.128/26"
+# NSG
+$webNsgName = "webservers"
+$dbNsgName = "database"
+$mgmtNsgName = "management"
 
-# --------------------------
-# Resource Group
-# --------------------------
-Write-Host "Creating a resource group $resourceGroupName ..."
-New-AzResourceGroup -Name $resourceGroupName -Location $location -Force
+# ===== VNET =====
+$vnet = Get-AzVirtualNetwork -Name $vnetName -ResourceGroupName $resourceGroupName -ErrorAction SilentlyContinue
+if (-not $vnet) {
+    Write-Host "Creating VNet..."
+    $vnet = New-AzVirtualNetwork -Name $vnetName -ResourceGroupName $resourceGroupName -Location $location -AddressPrefix "10.0.0.0/16"
+    Add-AzVirtualNetworkSubnetConfig -Name $webSubnetName -AddressPrefix "10.0.1.0/24" -VirtualNetwork $vnet | Out-Null
+    Add-AzVirtualNetworkSubnetConfig -Name $dbSubnetName -AddressPrefix "10.0.2.0/24" -VirtualNetwork $vnet | Out-Null
+    Add-AzVirtualNetworkSubnetConfig -Name $mgmtSubnetName -AddressPrefix "10.0.3.0/24" -VirtualNetwork $vnet | Out-Null
+    $vnet | Set-AzVirtualNetwork | Out-Null
+} else {
+    Write-Host "VNet already exists, using existing one."
+}
 
-# --------------------------
-# NSG for Webservers
-# --------------------------
-Write-Host "Creating webservers NSG..."
+# ===== RULES =====
+# Shared intra-VNet allow
+$allowVNetRule = New-AzNetworkSecurityRuleConfig -Name "AllowVNet" -Priority 200 -Direction Inbound -Access Allow -Protocol * -SourceAddressPrefix VirtualNetwork -DestinationAddressPrefix VirtualNetwork -SourcePortRange * -DestinationPortRange *
 
-$webRuleHttp = New-AzNetworkSecurityRuleConfig -Name "AllowHTTPFromInternet" -Priority 100 -Direction Inbound -Access Allow -Protocol Tcp `
-    -SourceAddressPrefix Internet -SourcePortRange * -DestinationAddressPrefix * -DestinationPortRange 80
+# Web (HTTP + HTTPS)
+$allowHttpRule = New-AzNetworkSecurityRuleConfig -Name "AllowHTTPFromInternet" -Priority 100 -Direction Inbound -Access Allow -Protocol Tcp -SourceAddressPrefix Internet -DestinationAddressPrefix * -SourcePortRange * -DestinationPortRange 80
+$allowHttpsRule = New-AzNetworkSecurityRuleConfig -Name "AllowHTTPSFromInternet" -Priority 110 -Direction Inbound -Access Allow -Protocol Tcp -SourceAddressPrefix Internet -DestinationAddressPrefix * -SourcePortRange * -DestinationPortRange 443
 
-$webRuleHttps = New-AzNetworkSecurityRuleConfig -Name "AllowHTTPSFromInternet" -Priority 110 -Direction Inbound -Access Allow -Protocol Tcp `
-    -SourceAddressPrefix Internet -SourcePortRange * -DestinationAddressPrefix * -DestinationPortRange 443
+# Management (SSH)
+$allowSshRule = New-AzNetworkSecurityRuleConfig -Name "AllowSSHFromInternet" -Priority 100 -Direction Inbound -Access Allow -Protocol Tcp -SourceAddressPrefix Internet -DestinationAddressPrefix * -SourcePortRange * -DestinationPortRange 22
 
-$webRuleVnet = New-AzNetworkSecurityRuleConfig -Name "AllowVNet" -Priority 200 -Direction Inbound -Access Allow -Protocol * `
-    -SourceAddressPrefix VirtualNetwork -SourcePortRange * -DestinationAddressPrefix VirtualNetwork -DestinationPortRange *
+# ===== WEB NSG =====
+$webNsg = Get-AzNetworkSecurityGroup -Name $webNsgName -ResourceGroupName $resourceGroupName -ErrorAction SilentlyContinue
+if (-not $webNsg) {
+    Write-Host "Creating Webservers NSG..."
+    $webNsg = New-AzNetworkSecurityGroup -Name $webNsgName -ResourceGroupName $resourceGroupName -Location $location -SecurityRules @($allowHttpRule, $allowHttpsRule, $allowVNetRule)
+} else {
+    Write-Host "Updating Webservers NSG..."
+    $webNsg.SecurityRules.Clear()
+    $webNsg.SecurityRules.Add($allowHttpRule)
+    $webNsg.SecurityRules.Add($allowHttpsRule)
+    $webNsg.SecurityRules.Add($allowVNetRule)
+    Set-AzNetworkSecurityGroup -NetworkSecurityGroup $webNsg | Out-Null
+}
 
-$webNSG = New-AzNetworkSecurityGroup -ResourceGroupName $resourceGroupName -Location $location -Name $webSubnetName -SecurityRules @($webRuleHttp,$webRuleHttps,$webRuleVnet)
+# ===== MANAGEMENT NSG =====
+$mgmtNsg = Get-AzNetworkSecurityGroup -Name $mgmtNsgName -ResourceGroupName $resourceGroupName -ErrorAction SilentlyContinue
+if (-not $mgmtNsg) {
+    Write-Host "Creating Management NSG..."
+    $mgmtNsg = New-AzNetworkSecurityGroup -Name $mgmtNsgName -ResourceGroupName $resourceGroupName -Location $location -SecurityRules @($allowSshRule, $allowVNetRule)
+} else {
+    Write-Host "Updating Management NSG..."
+    $mgmtNsg.SecurityRules.Clear()
+    $mgmtNsg.SecurityRules.Add($allowSshRule)
+    $mgmtNsg.SecurityRules.Add($allowVNetRule)
+    Set-AzNetworkSecurityGroup -NetworkSecurityGroup $mgmtNsg | Out-Null
+}
 
-# --------------------------
-# NSG for Management
-# --------------------------
-Write-Host "Creating management NSG..."
+# ===== DATABASE NSG =====
+$dbNsg = Get-AzNetworkSecurityGroup -Name $dbNsgName -ResourceGroupName $resourceGroupName -ErrorAction SilentlyContinue
+if (-not $dbNsg) {
+    Write-Host "Creating Database NSG..."
+    $dbNsg = New-AzNetworkSecurityGroup -Name $dbNsgName -ResourceGroupName $resourceGroupName -Location $location -SecurityRules @($allowVNetRule)
+} else {
+    Write-Host "Updating Database NSG..."
+    $dbNsg.SecurityRules.Clear()
+    $dbNsg.SecurityRules.Add($allowVNetRule)
+    Set-AzNetworkSecurityGroup -NetworkSecurityGroup $dbNsg | Out-Null
+}
 
-$mgmtRuleSsh = New-AzNetworkSecurityRuleConfig -Name "AllowSSHFromInternet" -Priority 120 -Direction Inbound -Access Allow -Protocol Tcp `
-    -SourceAddressPrefix Internet -SourcePortRange * -DestinationAddressPrefix * -DestinationPortRange 22
+# ===== ASSOCIATE NSG TO SUBNETS =====
+$vnet = Get-AzVirtualNetwork -Name $vnetName -ResourceGroupName $resourceGroupName
+$vnet.Subnets | ForEach-Object {
+    if ($_.Name -eq $webSubnetName) { $_.NetworkSecurityGroup = $webNsg }
+    elseif ($_.Name -eq $dbSubnetName) { $_.NetworkSecurityGroup = $dbNsg }
+    elseif ($_.Name -eq $mgmtSubnetName) { $_.NetworkSecurityGroup = $mgmtNsg }
+}
+$vnet | Set-AzVirtualNetwork | Out-Null
 
-$mgmtRuleVnet = New-AzNetworkSecurityRuleConfig -Name "AllowVNet" -Priority 200 -Direction Inbound -Access Allow -Protocol * `
-    -SourceAddressPrefix VirtualNetwork -SourcePortRange * -DestinationAddressPrefix VirtualNetwork -DestinationPortRange *
-
-$mgmtNSG = New-AzNetworkSecurityGroup -ResourceGroupName $resourceGroupName -Location $location -Name $mngSubnetName -SecurityRules @($mgmtRuleSsh,$mgmtRuleVnet)
-
-# --------------------------
-# NSG for Database
-# --------------------------
-Write-Host "Creating database NSG..."
-
-$dbRuleVnet = New-AzNetworkSecurityRuleConfig -Name "AllowVNet" -Priority 200 -Direction Inbound -Access Allow -Protocol * `
-    -SourceAddressPrefix VirtualNetwork -SourcePortRange * -DestinationAddressPrefix VirtualNetwork -DestinationPortRange *
-
-$dbNSG = New-AzNetworkSecurityGroup -ResourceGroupName $resourceGroupName -Location $location -Name $dbSubnetName -SecurityRules @($dbRuleVnet)
-
-# --------------------------
-# Virtual Network + Subnets
-# --------------------------
-Write-Host "Creating virtual network with subnets ..."
-$webSubnet = New-AzVirtualNetworkSubnetConfig -Name $webSubnetName -AddressPrefix $webSubnetIpRange -NetworkSecurityGroup $webNSG
-$dbSubnet = New-AzVirtualNetworkSubnetConfig -Name $dbSubnetName -AddressPrefix $dbSubnetIpRange -NetworkSecurityGroup $dbNSG
-$mngSubnet = New-AzVirtualNetworkSubnetConfig -Name $mngSubnetName -AddressPrefix $mngSubnetIpRange -NetworkSecurityGroup $mgmtNSG
-
-New-AzVirtualNetwork -Name $virtualNetworkName `
-    -ResourceGroupName $resourceGroupName `
-    -Location $location `
-    -AddressPrefix $vnetAddressPrefix `
-    -Subnet $webSubnet,$dbSubnet,$mngSubnet
-
-Write-Host "✅ All resources created successfully"
+Write-Host "Deployment completed successfully."
