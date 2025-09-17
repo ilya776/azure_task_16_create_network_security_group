@@ -47,9 +47,6 @@ Write-Host "Creating database NSG..."
 # Порожній NSG (немає правил)
 $dbNSG = New-AzNetworkSecurityGroup -ResourceGroupName $resourceGroupName -Location $location -Name $dbSubnetName
 
-# --------------------------
-# Virtual Network + Subnets
-# --------------------------
 Write-Host "Creating virtual network with subnets ..."
 $webSubnet = New-AzVirtualNetworkSubnetConfig -Name $webSubnetName -AddressPrefix $webSubnetIpRange -NetworkSecurityGroup $webNSG
 $dbSubnet = New-AzVirtualNetworkSubnetConfig -Name $dbSubnetName -AddressPrefix $dbSubnetIpRange -NetworkSecurityGroup $dbNSG
